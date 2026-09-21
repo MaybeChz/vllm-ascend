@@ -21,7 +21,8 @@
 // Weight path: the AIV stage expands packed INT4-in-INT32 -> INT8 directly into
 // FRACTAL_NZ layout (16 DataCopyPad [16,32] blocks per [32,256] strip), so the
 // AIC feeds MatmulImpl a production-compatible NZ B tensor. On a P34 cache hit
-// the whole [E,K,N] NZ workspace is reused (skipUnpack=1).
+// the whole [E,K,N] NZ workspace is reused (skipUnpack=1). The additive cached
+// launcher derives this decision on-device before EVERY eager/graph execution.
 //
 // AIC GEMM tiles (expert, M-tile, N-tile) with BM=128 / BN=256, sync
 // IterateAll<true>, writing int32 acc [sumMPad, N] into GM before the wave
@@ -1008,6 +1009,136 @@ extern "C" __global__ __aicore__ void gmsq_fused_256(GM_ADDR x, GM_ADDR wPtrTbl,
     }
 }
 
+namespace {
+
+constexpr uint32_t CACHE_CONTROL_WORDS = 8;  // exactly one 32B DMA block
+
+// DMA -> scalar and scalar -> DMA events are explicit: the decisions use
+// scalar LocalTensor access, so MTE2_V / V_MTE3 alone would not be sufficient.
+__aicore__ inline void ReadCacheControl(const GlobalTensor<int32_t> &gm,
+                                       const LocalTensor<int32_t> &local)
+{
+    AscendC::DataCopy(local, gm, CACHE_CONTROL_WORDS);
+    AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+}
+
+__aicore__ inline void WriteCacheControl(const GlobalTensor<int32_t> &gm,
+                                        const LocalTensor<int32_t> &local)
+{
+    AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+    AscendC::DataCopy(gm, local, CACHE_CONTROL_WORDS);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+}
+
+__aicore__ inline void ClearLocalCacheControl(const LocalTensor<int32_t> &local)
+{
+    for (uint32_t i = 0; i < CACHE_CONTROL_WORDS; ++i) {
+        local.SetValue(i, 0);
+    }
+}
+
+}  // namespace
+
+// One writer. The pure-vector task type avoids a mixed-kernel block creating
+// two competing AIV writers; the explicit index guard is defensive as well.
+extern "C" __global__ __aicore__ void gmsq_w8_cache_prepare(GM_ADDR owner, GM_ADDR decision,
+                                                           uint64_t configId)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    if ASCEND_IS_AIV {
+        if (AscendC::GetBlockIdx() != 0 || AscendC::GetSubBlockIdx() != 0) {
+            return;
+        }
+        TPipe pipe;
+        TBuf<AscendC::TPosition::VECCALC> controlBuf;
+        pipe.InitBuffer(controlBuf, CACHE_CONTROL_WORDS * sizeof(int32_t));
+        LocalTensor<int32_t> local = controlBuf.Get<int32_t>();
+        GlobalTensor<int32_t> ownerGM;
+        GlobalTensor<int32_t> decisionGM;
+        ownerGM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(owner));
+        decisionGM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(decision));
+        ReadCacheControl(ownerGM, local);
+        const uint64_t currentOwner = static_cast<uint64_t>(static_cast<uint32_t>(local.GetValue(0))) |
+            (static_cast<uint64_t>(static_cast<uint32_t>(local.GetValue(1))) << 32);
+        const int32_t hit = (currentOwner == configId && configId != 0) ? 1 : 0;
+        ClearLocalCacheControl(local);
+        local.SetValue(0, hit);
+        WriteCacheControl(decisionGM, local);
+        if (hit == 0) {
+            // A failed unpack must not leave the PREVIOUS owner attached to a
+            // partially overwritten W8 allocation. Publication happens later.
+            ClearLocalCacheControl(local);
+            WriteCacheControl(ownerGM, local);
+        }
+    }
+}
+
+extern "C" __global__ __aicore__ void gmsq_w8_cache_publish(GM_ADDR owner, uint64_t configId)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    if ASCEND_IS_AIV {
+        if (AscendC::GetBlockIdx() != 0 || AscendC::GetSubBlockIdx() != 0) {
+            return;
+        }
+        TPipe pipe;
+        TBuf<AscendC::TPosition::VECCALC> controlBuf;
+        pipe.InitBuffer(controlBuf, CACHE_CONTROL_WORDS * sizeof(int32_t));
+        LocalTensor<int32_t> local = controlBuf.Get<int32_t>();
+        GlobalTensor<int32_t> ownerGM;
+        ownerGM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(owner));
+        ClearLocalCacheControl(local);
+        local.SetValue(0, static_cast<int32_t>(static_cast<uint32_t>(configId)));
+        local.SetValue(1, static_cast<int32_t>(static_cast<uint32_t>(configId >> 32)));
+        WriteCacheControl(ownerGM, local);
+    }
+}
+
+// The prepass has completed before this launch starts. No kernel writes
+// decision while any AIC/AIV below reads it, so every conditional SyncAll uses
+// one uniform value. Owner is not published until this entire launch completes.
+extern "C" __global__ __aicore__ void gmsq_fused_256_cached(
+    GM_ADDR x, GM_ADDR wPtrTbl, GM_ADDR scPtrTbl, GM_ADDR w8, GM_ADDR acc, GM_ADDR scaleF32,
+    GM_ADDR xScale, GM_ADDR y, GM_ADDR yScale, GM_ADDR groupList, int32_t E, int32_t kNum,
+    int32_t nNum, int32_t nBlock, int32_t NP, int32_t N, int32_t N2, int32_t K, int32_t C,
+    int32_t glType, float beta, float invBeta, int32_t hasLinear, float linBeta,
+    float invLinBeta, int32_t nzInput, GM_ADDR decision)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+    GlobalTensor<int64_t> glGM;
+    GlobalTensor<int32_t> decisionGM;
+    glGM.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(groupList));
+    decisionGM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(decision));
+    if ASCEND_IS_AIC {
+        // A3 AIC has no AIV UB path. This single scalar GM read is intentional:
+        // invalidate its own 64B cacheline on EVERY launch before loading it.
+        // All control WRITES and all AIV control reads use DMA instead.
+        AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
+                                        AscendC::DcciDst::CACHELINE_OUT>(decisionGM);
+        const int32_t skipUnpack = decisionGM.GetValue(0);
+        AscendC::AscendCUtils::SetOverflow(1);
+        TPipe pipe;
+        GmsqGemmKernel256 kernel;
+        kernel.Init(x, w8, acc, scPtrTbl, glGM, E, glType, K, N, nBlock, &pipe);
+        kernel.ProcessFused(skipUnpack);
+    }
+    if ASCEND_IS_AIV {
+        TPipe pipe;
+        TBuf<AscendC::TPosition::VECCALC> controlBuf;
+        pipe.InitBuffer(controlBuf, CACHE_CONTROL_WORDS * sizeof(int32_t));
+        LocalTensor<int32_t> local = controlBuf.Get<int32_t>();
+        ReadCacheControl(decisionGM, local);
+        const int32_t skipUnpack = local.GetValue(0);
+        GmsqFusedAivKernel256 kernel;
+        kernel.Init(wPtrTbl, scPtrTbl, w8, acc, scaleF32, xScale, y, yScale, glGM, E, glType,
+                    kNum, nNum, NP, N, N2, K, C, beta, invBeta, hasLinear, linBeta, invLinBeta,
+                    nBlock, &pipe, skipUnpack, nzInput);
+        kernel.Process();
+    }
+}
+
 
 
 // Host-side launcher exported to the vllm_ascend_C extension (bgmv/sgmv
@@ -1027,5 +1158,23 @@ void gmsq_fused_256_impl(uint32_t blockDim, void *stream, void *x, void *wPtrTbl
                                                    y, yScale, groupList, E, kNum, nNum, nBlock, NP,
                                                    N, N2, K, C, glType, beta, invBeta, hasLinear,
                                                    linBeta, invLinBeta, skipUnpack, nzInput);
+}
+
+void gmsq_fused_256_cached_impl(uint32_t blockDim, void *stream, void *x, void *wPtrTbl, void *scPtrTbl,
+                              void *w8, void *acc, void *scaleF32, void *xScale, void *y, void *yScale,
+                              void *groupList, int32_t E, int32_t kNum, int32_t nNum, int32_t nBlock,
+                              int32_t NP, int32_t N, int32_t N2, int32_t K, int32_t C, int32_t glType,
+                              float beta, float invBeta, int32_t hasLinear, float linBeta,
+                              float invLinBeta, int32_t nzInput, void *owner, void *decision,
+                              uint64_t configId)
+{
+    // All three launches use the EXACT same stream and are recorded by graph
+    // capture. Never replace prepare/publish with host-side last-owner state.
+    gmsq_w8_cache_prepare<<<1, nullptr, stream>>>(owner, decision, configId);
+    gmsq_fused_256_cached<<<blockDim, nullptr, stream>>>(
+        x, wPtrTbl, scPtrTbl, w8, acc, scaleF32, xScale, y, yScale, groupList,
+        E, kNum, nNum, nBlock, NP, N, N2, K, C, glType, beta, invBeta, hasLinear,
+        linBeta, invLinBeta, nzInput, decision);
+    gmsq_w8_cache_publish<<<1, nullptr, stream>>>(owner, configId);
 }
 }  // namespace vllm_ascend
