@@ -376,9 +376,9 @@ __aicore__ inline int32_t SelectProfileNBlock(Meta &meta, int32_t E, int32_t K,
 // to [sumMPad, N] int32 GM (cross-expert padded rows). Wave-major tile order
 // (t = w*cores + core) with a wave handshake to the local AIV pair.
 // ---------------------------------------------------------------------------
-class GmmSituQuantGemmKernel256 {
+class GmsqGemmKernel256 {
 public:
-    __aicore__ inline GmmSituQuantGemmKernel256() {}
+    __aicore__ inline GmsqGemmKernel256() {}
 
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR w, GM_ADDR acc, GM_ADDR scPtrTbl,
                                 const GlobalTensor<int64_t> &glGM, int32_t E, int32_t glType,
@@ -442,7 +442,7 @@ public:
         // P54 header-opt: small-M (decode/cap, mValid<=64) collapses the per-wave
         // handshake into ONE cross-core sync (decode = 5 waves -> 5 syncs before,
         // 1 now), removing the fixed per-wave sync/launch overhead that dominates
-        // small-M. Formula MUST match GmmSituQuantFusedAivKernel256::ActPhase (same
+        // small-M. Formula MUST match GmsqFusedAivKernel256::ActPhase (same
         // threshold P54_SMALL_M and same expression).
         int32_t mValid = meta_.SumM();
         int32_t waveBatch = (mValid <= P54_SMALL_M)
@@ -518,9 +518,9 @@ private:
 //   Phase 2: per wave batch: wait FLAG_WAVE_READY + SyncAll, then act+quant the
 //     row-blocks completed by this batch. Rows striped over all slots.
 // ---------------------------------------------------------------------------
-class GmmSituQuantFusedAivKernel256 {
+class GmsqFusedAivKernel256 {
 public:
-    __aicore__ inline GmmSituQuantFusedAivKernel256() {}
+    __aicore__ inline GmsqFusedAivKernel256() {}
 
     __aicore__ inline void Init(GM_ADDR wPtrTbl, GM_ADDR scPtrTbl, GM_ADDR w8, GM_ADDR acc,
                                 GM_ADDR scaleF32, GM_ADDR xScale, GM_ADDR y, GM_ADDR yScale,
@@ -797,7 +797,7 @@ protected:
         redWork_ = redWorkBuf_.Get<float>();
         chunkMax_ = chunkMaxBuf_.Get<float>();
 
-        // P54 header-opt: match GmmSituQuantGemmKernel256::ProcessFused (identical
+        // P54 header-opt: match GmsqGemmKernel256::ProcessFused (identical
         // P54_SMALL_M threshold and expression) so the AIC flag emission and the
         // AIV flag wait collapse to a single cross-core sync for small M.
         int32_t mValid = meta_.MValid();
@@ -1053,7 +1053,7 @@ protected:
 // every forward, so the operator is correct for DYNAMIC production MoE
 // group_list (new tensor or in-place update) with zero host D2H and no glPtr in
 // any cache key.
-extern "C" __global__ __aicore__ void gmm_situ_quant_msd_exact(
+extern "C" __global__ __aicore__ void gmsq_msd_exact(
     GM_ADDR x, GM_ADDR wPtrTbl, GM_ADDR scPtrTbl, GM_ADDR packedA, GM_ADDR rawAcc,
     GM_ADDR xScale, GM_ADDR y, GM_ADDR yScale, GM_ADDR groupList,
     int32_t E, int32_t K, int32_t N, int32_t C, int32_t glType,
@@ -1067,17 +1067,17 @@ extern "C" __global__ __aicore__ void gmm_situ_quant_msd_exact(
     if ASCEND_IS_AIC {
         AscendC::AscendCUtils::SetOverflow(1);
         if (nzInput != 0) {
-            GmmSituQuantExactMsdCube<MsdNzMt, true> kernel;
+            GmsqExactMsdCube<MsdNzMt, true> kernel;
             kernel.Init(wPtrTbl, packedA, rawAcc, glGM, E, K, N, glType, &pipe);
             kernel.Process();
         } else {
-            GmmSituQuantExactMsdCube<> kernel;
+            GmsqExactMsdCube<> kernel;
             kernel.Init(wPtrTbl, packedA, rawAcc, glGM, E, K, N, glType, &pipe);
             kernel.Process();
         }
     }
     if ASCEND_IS_AIV {
-        GmmSituQuantExactMsdVector kernel;
+        GmsqExactMsdVector kernel;
         kernel.Init(x, wPtrTbl, scPtrTbl, packedA, rawAcc, xScale, y, yScale,
                     glGM, E, K, N, C, glType, beta, invBeta, hasLinear, linBeta,
                     invLinBeta, &pipe);
@@ -1086,13 +1086,13 @@ extern "C" __global__ __aicore__ void gmm_situ_quant_msd_exact(
 }
 
 namespace vllm_ascend {
-void gmm_situ_quant_msd_exact_impl(uint32_t blockDim, void *stream, void *x, void *wPtrTbl,
+void gmsq_msd_exact_impl(uint32_t blockDim, void *stream, void *x, void *wPtrTbl,
     void *scPtrTbl, void *packedA, void *rawAcc, void *xScale, void *y,
     void *yScale, void *groupList, int32_t E, int32_t K, int32_t N,
     int32_t C, int32_t glType, float beta, float invBeta, int32_t hasLinear,
     float linBeta, float invLinBeta, int32_t nzInput)
 {
-    gmm_situ_quant_msd_exact<<<blockDim, nullptr, stream>>>(x, wPtrTbl, scPtrTbl,
+    gmsq_msd_exact<<<blockDim, nullptr, stream>>>(x, wPtrTbl, scPtrTbl,
         packedA, rawAcc, xScale, y, yScale, groupList, E, K, N, C, glType,
         beta, invBeta, hasLinear, linBeta, invLinBeta, nzInput);
 }

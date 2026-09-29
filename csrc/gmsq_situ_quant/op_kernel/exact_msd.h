@@ -83,7 +83,7 @@ constexpr static auto msdNzCFG = MakeMsdNzTiling();
 using MsdNzMt = AscendC::MatmulImpl<MsdA, MsdNzB, MsdC, MsdBias, msdNzCFG>;
 
 template <typename MM_TYPE = MsdMt, bool NativeNz = false>
-class GmmSituQuantExactMsdCube {
+class GmsqExactMsdCube {
 public:
     __aicore__ inline void Init(GM_ADDR wt, GM_ADDR packed, GM_ADDR raw,
         const GlobalTensor<int64_t> &gl, int32_t E, int32_t K, int32_t N,
@@ -147,7 +147,7 @@ private:
     int32_t N_;
 };
 
-class GmmSituQuantExactMsdVector : public GmmSituQuantFusedAivKernel256 {
+class GmsqExactMsdVector : public GmsqFusedAivKernel256 {
 public:
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR wt, GM_ADDR scales,
         GM_ADDR packed, GM_ADDR raw, GM_ADDR xs, GM_ADDR y, GM_ADDR ys,
@@ -155,7 +155,7 @@ public:
         int32_t C, int32_t glType, float beta, float invBeta, int32_t hasLinear,
         float linBeta, float invLinBeta, TPipe *pipe)
     {
-        GmmSituQuantFusedAivKernel256::Init(wt, scales, packed, raw, nullptr, xs, y, ys,
+        GmsqFusedAivKernel256::Init(wt, scales, packed, raw, nullptr, xs, y, ys,
             gl, E, glType, K / UNPACK_BK, N / BN, N / 8, N, N / 2, K, C,
             beta, invBeta, hasLinear, linBeta, invLinBeta, MSD_NBLOCK, pipe,
             1, 0, nullptr, 0, BOUNDED_MAX_E, true);
