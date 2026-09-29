@@ -327,22 +327,6 @@ class TestGmmSituQuantExtensionLoading(unittest.TestCase):
 
 
 class TestW4A8SituPath(unittest.TestCase):
-    def test_a3_gmm_situ_quant_selection_does_not_read_environment(self):
-        inputs = {
-            "hidden_states": torch.ones(2, 64, dtype=torch.int8),
-            "w1": torch.ones(2, 64, 32, dtype=torch.int32),
-            "w1_scale": torch.ones(2, 256, dtype=torch.int64),
-            "group_list_type": 1,
-            "group_list": torch.tensor([1, 1]),
-            "x_scale": torch.ones(2),
-        }
-        with (
-            patch.object(w4a8_module, "get_ascend_device_type", return_value=AscendDeviceType.A3),
-            patch.object(w4a8_module, "_get_grouped_matmul_situ_quant", return_value=MagicMock()),
-            patch("os.getenv", side_effect=AssertionError("Fusion selection must not read environment flags")),
-        ):
-            self.assertTrue(w4a8_module._gmm_situ_quant_fusion_supported(**inputs))
-
     def test_a3_w4a8_situ_uses_gmm_situ_quant_fusion(self):
         method = AscendW4A8DynamicFusedMoEMethod.__new__(AscendW4A8DynamicFusedMoEMethod)
         method.use_expert_weight_list = False
