@@ -62,20 +62,20 @@
 namespace vllm_ascend {
 
 // Exact MSD device kernel launcher.
-void gmsq_msd_exact_impl(uint32_t blockDim, void *stream, void *x, void *wPtrTbl,
+void gmm_situ_quant_msd_exact_impl(uint32_t blockDim, void *stream, void *x, void *wPtrTbl,
     void *scPtrTbl, void *packedA, void *rawAcc, void *xScale, void *y,
     void *yScale, void *groupList, int32_t E, int32_t K, int32_t N,
     int32_t C, int32_t glType, float beta, float invBeta, int32_t hasLinear,
     float linBeta, float invLinBeta, int32_t nzInput);
 
 // x_scale uses fixed-size UB chunks. Bound the AIC expert-of-block table.
-constexpr int64_t GMSQ_MAX_M_BLOCKS = 256;
+constexpr int64_t GMM_SITU_QUANT_MAX_M_BLOCKS = 256;
 
-constexpr int32_t GMSQ_BM = 128;
-constexpr int32_t GMSQ_BN = 128;
-constexpr int32_t GMSQ_BK = 64;
-constexpr int64_t GMSQ_MAX_EXPERTS = 128;
-constexpr int64_t GMSQ_EXACT_MAX_K = (1LL << 24) / 1024;
+constexpr int32_t GMM_SITU_QUANT_BM = 128;
+constexpr int32_t GMM_SITU_QUANT_BN = 128;
+constexpr int32_t GMM_SITU_QUANT_BK = 64;
+constexpr int64_t GMM_SITU_QUANT_MAX_EXPERTS = 128;
+constexpr int64_t GMM_SITU_QUANT_EXACT_MAX_K = (1LL << 24) / 1024;
 
 // ACL tensor format ids (see acl_base.h / torch_npu Format enum).
 constexpr int64_t ACL_FMT_ND = 2;
@@ -130,7 +130,7 @@ static std::mutex g_fusedCacheMutex;
 static std::vector<std::unique_ptr<FusedMetaCache>> g_fusedMetaEntries;
 static std::vector<std::unique_ptr<FusedScratchCache>> g_fusedScratchEntries;
 
-// Mirrors GmsqFusedAivKernel256::Init(rawInt32=true). All rows are already
+// Mirrors GmmSituQuantFusedAivKernel256::Init(rawInt32=true). All rows are already
 // 32-byte aligned; metadata and the scalar reduction outputs are rounded up.
 // Sigmoid explicitly reuses aBuf_, so it requires no hidden UB stack space.
 static int64_t MsdUbBytes(int64_t experts, int64_t N2)
@@ -210,16 +210,16 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant(
     int64_t C = x.sizes()[0];      // x rows (capacity, >= M_valid)
     int64_t K = x.sizes()[1];
     int64_t experts = static_cast<int64_t>(weight.size());
-    TORCH_CHECK(experts <= GMSQ_MAX_EXPERTS, "grouped_matmul_situ_quant supports at most 128 experts");
+    TORCH_CHECK(experts <= GMM_SITU_QUANT_MAX_EXPERTS, "grouped_matmul_situ_quant supports at most 128 experts");
     TORCH_CHECK(weight[0].dim() == 2, "weight[e] must be [K, N/8]");
     int64_t NP = weight[0].sizes()[1];  // packed N/8 per row
     TORCH_CHECK(NP > 0 && NP <= std::numeric_limits<int32_t>::max() / 8,
                 "packed N/8 must be positive and fit the kernel int32 shape ABI");
     int64_t N = NP * 8;
     int64_t N2 = N / 2;
-    TORCH_CHECK(K > 0 && K % GMSQ_BK == 0, "unsupported K: K must be a positive multiple of 64");
-    TORCH_CHECK(N % GMSQ_BN == 0, "N must be a multiple of 128");
-    TORCH_CHECK(N2 % GMSQ_BN == 0, "N/2 must be a multiple of 128");
+    TORCH_CHECK(K > 0 && K % GMM_SITU_QUANT_BK == 0, "unsupported K: K must be a positive multiple of 64");
+    TORCH_CHECK(N % GMM_SITU_QUANT_BN == 0, "N must be a multiple of 128");
+    TORCH_CHECK(N2 % GMM_SITU_QUANT_BN == 0, "N/2 must be a multiple of 128");
     TORCH_CHECK(weight[0].scalar_type() == at::kInt, "weight must be int32 packed");
     TORCH_CHECK(weight_scale[0].scalar_type() == at::kLong, "weight_scale must be int64 carrier");
     for (int64_t e = 0; e < experts; ++e) {
@@ -233,7 +233,7 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant(
     // This is a computation limit, independent of the ND/NZ storage contract.
     // (low-aux)+16*high has integer intermediates of magnitude <=1024*K;
     // all are exactly representable in FP32 through K=16384.
-    TORCH_CHECK(K <= GMSQ_EXACT_MAX_K,
+    TORCH_CHECK(K <= GMM_SITU_QUANT_EXACT_MAX_K,
                 "unsupported K for exact FP32 MSD reconstruction: 1024*K must be <=2^24; got K=", K);
     uint64_t ubBytes = 0;
     ascendcPlatform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubBytes);
@@ -243,10 +243,10 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant(
                 " UB bytes, device provides ", ubBytes, "; E=", experts, ", N=", N);
 
     const int64_t activeUpperBound = std::min(experts, C);
-    const int64_t paddedBlockUpperBound = activeUpperBound + (C - activeUpperBound) / GMSQ_BM;
-    TORCH_CHECK(paddedBlockUpperBound <= GMSQ_MAX_M_BLOCKS,
+    const int64_t paddedBlockUpperBound = activeUpperBound + (C - activeUpperBound) / GMM_SITU_QUANT_BM;
+    TORCH_CHECK(paddedBlockUpperBound <= GMM_SITU_QUANT_MAX_M_BLOCKS,
                 "grouped_matmul_situ_quant: capacity/expert combination exceeds the ",
-                GMSQ_MAX_M_BLOCKS, " padded M-block metadata limit");
+                GMM_SITU_QUANT_MAX_M_BLOCKS, " padded M-block metadata limit");
 
     auto devOptI8 = at::TensorOptions().device(x.device()).dtype(at::kChar);
     auto devOptI32 = at::TensorOptions().device(x.device()).dtype(at::kInt);
@@ -288,10 +288,10 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant(
 
     // ---- FUSED single-launch path (device-side group_list parse) ----
     {
-        const aclrtStream gmsqStream = c10_npu::getCurrentNPUStream().stream();
+        const aclrtStream gmmSituQuantStream = c10_npu::getCurrentNPUStream().stream();
         aclmdlRICaptureStatus captureStatus = ACL_MODEL_RI_CAPTURE_STATUS_NONE;
         aclmdlRI captureModel = nullptr;
-        const aclError captureError = aclmdlRICaptureGetInfo(gmsqStream, &captureStatus, &captureModel);
+        const aclError captureError = aclmdlRICaptureGetInfo(gmmSituQuantStream, &captureStatus, &captureModel);
         TORCH_CHECK(captureError == ACL_SUCCESS,
                     "grouped_matmul_situ_quant: capture status query failed: ", captureError);
         TORCH_CHECK(captureStatus != ACL_MODEL_RI_CAPTURE_STATUS_INVALIDATED,
@@ -428,7 +428,7 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant(
         const FusedMetaCache &fc = *meta;
         FusedScratchCache *scratch = nullptr;
         for (const auto &entry : g_fusedScratchEntries) {
-            if (entry->device == device && entry->stream == gmsqStream && entry->K == K && entry->N == N) {
+            if (entry->device == device && entry->stream == gmmSituQuantStream && entry->K == K && entry->N == N) {
                 scratch = entry.get();
                 break;
             }
@@ -436,7 +436,7 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant(
         if (scratch == nullptr) {
             auto entry = std::make_unique<FusedScratchCache>();
             entry->device = device;
-            entry->stream = gmsqStream;
+            entry->stream = gmmSituQuantStream;
             entry->K = K;
             entry->N = N;
             scratch = entry.get();
@@ -448,7 +448,7 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant(
         // weight layout do not change its size or its recorded graph address.
         {
             constexpr int64_t msdSlots = 8;
-            constexpr int64_t msdRawRows = 2 * GMSQ_BM + 16;
+            constexpr int64_t msdRawRows = 2 * GMM_SITU_QUANT_BM + 16;
             const int64_t packedBytes = msdSlots * msdRawRows * K / 2;
             const int64_t rawBytes = msdSlots * msdRawRows * N * sizeof(int32_t);
             if (!scratch->msdPackedA.defined()) {
@@ -478,12 +478,12 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant(
                                            x_scale, y, y_scale, kernelGroupList}) {
                 keepAlive.emplace_back(tensor.storage());
             }
-            std::function<int()> handler = [gmsqStream, aicCoreNum, xPtr, wPtr,
+            std::function<int()> handler = [gmmSituQuantStream, aicCoreNum, xPtr, wPtr,
                 sPtr, aPtr, cPtr, xsPtr, yPtr, ysPtr, glPtr, experts, K, N, C,
                 group_list_type, betaF, invBeta, hasLinear, lbF, invLb, srcIsNz,
                 keepAlive = std::move(keepAlive)]() -> int {
                 (void)keepAlive;
-                gmsq_msd_exact_impl(aicCoreNum, gmsqStream, xPtr, wPtr, sPtr,
+                gmm_situ_quant_msd_exact_impl(aicCoreNum, gmmSituQuantStream, xPtr, wPtr, sPtr,
                     aPtr, cPtr, xsPtr, yPtr, ysPtr, glPtr, experts, K, N, C,
                     group_list_type, betaF, invBeta, hasLinear, lbF, invLb, srcIsNz ? 1 : 0);
                 return 0;

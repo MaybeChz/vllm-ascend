@@ -10,8 +10,8 @@
 // Fused grouped matmul (exact A8W4 MSD) + SiTU + per-token INT8 quant, single launch
 // (GroupedMatmulSituQuant). Vendored from the A3 fused-operator delivery and
 // adapted to the vllm-ascend extension build.
-#ifndef VLLM_ASCEND_GMSQ_SITU_QUANT_H_
-#define VLLM_ASCEND_GMSQ_SITU_QUANT_H_
+#ifndef VLLM_ASCEND_GMM_SITU_QUANT_H_
+#define VLLM_ASCEND_GMM_SITU_QUANT_H_
 
 #include <optional>
 #include <tuple>
@@ -28,4 +28,4 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant(
 
 }  // namespace vllm_ascend
 
-#endif  // VLLM_ASCEND_GMSQ_SITU_QUANT_H_
+#endif  // VLLM_ASCEND_GMM_SITU_QUANT_H_

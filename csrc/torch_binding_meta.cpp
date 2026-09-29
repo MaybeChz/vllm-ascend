@@ -2131,7 +2131,7 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
     return {y, mxscale};
 }
 
-#ifdef VLLM_ASCEND_BUILD_GMSQ
+#ifdef VLLM_ASCEND_BUILD_GMM_SITU_QUANT
 std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant_meta(
     const at::Tensor &x, at::TensorList weight, at::TensorList weight_scale,
     const at::Tensor &x_scale, const at::Tensor &group_list, at::TensorList weight_assist_matrix,
@@ -2186,7 +2186,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("recurrent_kda", &vllm_ascend::meta::recurrent_kda_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
     ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
-#ifdef VLLM_ASCEND_BUILD_GMSQ
+#ifdef VLLM_ASCEND_BUILD_GMM_SITU_QUANT
     ops.impl("grouped_matmul_situ_quant", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
 #endif
     // Launch host print from device
