@@ -74,7 +74,7 @@ Select an image based on your machine type and start the docker image on your no
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run --rm \
-    -e ASCEND_VISIBLE_DEVICES=0 \
+    -e ASCEND_VISIBLE_DEVICES=0-7 \
     --name vllm-ascend \
     --shm-size=1g \
     -v /root/.cache:/root/.cache \
@@ -224,10 +224,8 @@ Run docker container to start the vLLM server on single-NPU:
     # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
     --dtype float16 \
-    --max-model-len 16384 \
     --host 0.0.0.0 \
     --port $2 \
-    --dtype bfloat16 \
     --served-model-name qwen3vl \
     --no-enable-prefix-caching \
     --data-parallel-size $3 \
@@ -272,7 +270,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-    "model": "Qwen/Qwen3-VL-8B-Instruct",
+    "model": "qwen3vl",
     "messages": [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [
@@ -363,7 +361,7 @@ There are three `vllm bench` subcommands:
 The performance evaluation must be conducted in an online mode. Take the `serve` as an example. Run the code as follows.
 
 ```shell
-vllm bench serve --model Qwen/Qwen3-VL-8B-Instruct --dataset-name random --random-input-len 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model qwen3vl --dataset-name random --random-input-len 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After several minutes, you can get the performance evaluation result.
